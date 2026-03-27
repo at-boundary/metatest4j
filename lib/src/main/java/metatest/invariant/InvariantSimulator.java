@@ -46,8 +46,10 @@ public class InvariantSimulator {
             Response originalResponse,
             int requestIndex) {
 
-        // Get invariants configured for this endpoint/method
-        List<InvariantConfig> invariants = SimulatorConfig.getInvariantsForEndpoint(endpointPattern, httpMethod);
+        // Get invariants: prefer resolved test config (merges global + class + method), fall back to global
+        List<InvariantConfig> invariants = (context.getResolvedTestConfig() != null)
+                ? context.getResolvedTestConfig().getInvariantsFor(endpointPattern, httpMethod)
+                : SimulatorConfig.getInvariantsForEndpoint(endpointPattern, httpMethod);
 
         if (invariants.isEmpty()) {
             System.out.printf("[Metatest-Invariant] No invariants configured for %s %s%n", httpMethod, endpointPattern);
@@ -58,7 +60,9 @@ public class InvariantSimulator {
                 invariants.size(), httpMethod, endpointPattern);
 
         Map<String, Object> responseMap = originalResponse.getResponseAsMap();
-        boolean stopOnFirstCatch = SimulatorConfig.isStopOnFirstCatchEnabled();
+        boolean stopOnFirstCatch = (context.getResolvedTestConfig() != null)
+                ? context.getResolvedTestConfig().isStopOnFirstCatch()
+                : SimulatorConfig.isStopOnFirstCatchEnabled();
 
         for (InvariantConfig invariant : invariants) {
             String invariantName = invariant.getName() != null ? invariant.getName() : "unnamed_invariant";

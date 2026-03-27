@@ -1,6 +1,10 @@
 package metatest.core.interceptor;
 
+import metatest.core.config.ConfigResolver;
+import metatest.core.config.ResolvedTestConfig;
 import metatest.core.config.SimulatorConfig;
+import metatest.core.config.TestScopedConfig;
+import metatest.core.config.TestScopedConfigCache;
 import metatest.http.HTTPFactory;
 import metatest.http.Request;
 import metatest.http.Response;
@@ -8,6 +12,8 @@ import metatest.simulation.Runner;
 import metatest.core.interceptor.TestContext;
 import metatest.core.interceptor.TestContextManager;
 import metatest.coverage.Logger;
+
+import java.util.Optional;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.entity.StringEntity;
@@ -24,13 +30,27 @@ public class AspectExecutor {
 
     @Around("execution(@org.junit.jupiter.api.Test * *(..))")
     public Object interceptTestMethod(ProceedingJoinPoint joinPoint) throws Throwable {
+        String methodName = joinPoint.getSignature().getName();
+        Class<?> testClass = joinPoint.getSignature().getDeclaringType();
+
+        // Resolve per-test config (lazy-loaded, cached per class)
+        Optional<TestScopedConfig> classConfig = TestScopedConfigCache.getInstance().get(testClass);
+        ResolvedTestConfig resolvedConfig = ConfigResolver.resolve(classConfig, methodName);
+
+        // Short-circuit: test is excluded from simulation via .metatest.yml
+        if (resolvedConfig.isSkip()) {
+            System.out.println("[Metatest] Simulation excluded via .metatest.yml for: " + methodName);
+            return joinPoint.proceed();
+        }
+
         TestContext context = new TestContext();
-        context.setTestName(joinPoint.getSignature().getName());
+        context.setTestName(methodName);
+        context.setResolvedTestConfig(resolvedConfig);
         TestContextManager.setContext(context);
         Object originalTestResult;
 
         try {
-            System.out.println("Intercepting test method: " + joinPoint.getSignature().getName());
+            System.out.println("Intercepting test method: " + methodName);
             System.out.println("Executing original test run to capture baseline...");
 
             originalTestResult = joinPoint.proceed();
@@ -41,10 +61,11 @@ public class AspectExecutor {
             }
             System.out.println("Original test run completed. Baseline response captured.");
 
-            String testName = joinPoint.getSignature().getName();
             String endpointUrl = context.getOriginalRequest() != null ? context.getOriginalRequest().getUrl() : "";
 
-            if (!SimulatorConfig.isTestExcluded(testName) && !SimulatorConfig.isEndpointExcluded(endpointUrl)) {
+            if (!SimulatorConfig.isTestExcluded(methodName)
+                    && !SimulatorConfig.isEndpointExcluded(endpointUrl)
+                    && !resolvedConfig.isEndpointExcluded(endpointUrl)) {
                 Runner.executeTestWithSimulatedFaults(joinPoint, context);
             } else {
                 System.out.println("Skipping fault simulation for this test due to exclusion rules.");
@@ -54,7 +75,7 @@ public class AspectExecutor {
             // Clean up the context for the current thread to prevent memory leaks
             // and state bleeding between tests in the same thread.
             TestContextManager.clearContext();
-            System.out.println("Test method execution finished: " + joinPoint.getSignature().getName());
+            System.out.println("Test method execution finished: " + methodName);
         }
 
         return originalTestResult;

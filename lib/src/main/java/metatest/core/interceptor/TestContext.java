@@ -1,6 +1,7 @@
 package metatest.core.interceptor;
 
 import lombok.Data;
+import metatest.core.config.ResolvedTestConfig;
 import metatest.http.Request;
 import metatest.http.Response;
 
@@ -22,6 +23,7 @@ public class TestContext {
     }
 
     private String testName;
+    private ResolvedTestConfig resolvedTestConfig;
     private Request originalRequest;
     private Response originalResponse;
     private Response simulatedResponse;

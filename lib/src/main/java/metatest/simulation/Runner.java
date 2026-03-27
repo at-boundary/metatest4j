@@ -96,9 +96,14 @@ public final class Runner {
             context.setCurrentSimulationIndex(requestIndex);
 
             // === Contract Faults (field-level mutations) ===
-            boolean stopOnFirstCatch = SimulatorConfig.isStopOnFirstCatchEnabled();
+            boolean stopOnFirstCatch = context.getResolvedTestConfig() != null
+                    ? context.getResolvedTestConfig().isStopOnFirstCatch()
+                    : SimulatorConfig.isStopOnFirstCatchEnabled();
+            List<FaultCollection> enabledFaults = context.getResolvedTestConfig() != null
+                    ? context.getResolvedTestConfig().getEnabledFaults()
+                    : ENABLED_FAULTS;
             for (String field : originalResponse.getResponseAsMap().keySet()) {
-                for (FaultCollection fault : ENABLED_FAULTS) {
+                for (FaultCollection fault : enabledFaults) {
                     // Skip if stop_on_first_catch is enabled and fault was already caught
                     if (stopOnFirstCatch && REPORT.isContractFaultCaught(endpointPattern, fault.name(), field)) {
                         System.out.printf("  -> Skipping fault '%s' on field '%s' (already caught by another test)%n", fault, field);
