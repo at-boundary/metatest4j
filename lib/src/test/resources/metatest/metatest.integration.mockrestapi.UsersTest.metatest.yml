@@ -1,0 +1,43 @@
+version: "1.0"
+
+# ── Class-level overrides ─────────────────────────────────────────────────────
+
+settings:
+  stop_on_first_catch: false
+
+# Class-level invariants for /api/v1/users/{id} — applies to all tests in this class
+# that hit that endpoint
+endpoints:
+  /api/v1/users/{id}:
+    GET:
+      invariants:
+        - name: users_test_email_present
+          field: email
+          is_not_null: true
+
+        - name: users_test_username_present
+          field: username
+          is_not_null: true
+
+# ── Method-level overrides ────────────────────────────────────────────────────
+
+tests:
+
+  # Extra invariant specific to the focused user detail test
+  testGetUser:
+    endpoints:
+      /api/v1/users/{id}:
+        GET:
+          invariants:
+            - name: profile_first_name_present
+              field: profile.firstName
+              is_not_null: true
+
+            - name: profile_last_name_present
+              field: profile.lastName
+              is_not_null: true
+
+  # testUserPreferencesWithNullValues explicitly asserts sms IS null.
+  # Excluding to avoid interaction with null/missing mutations on the sms field.
+  testUserPreferencesWithNullValues:
+    exclude: true
