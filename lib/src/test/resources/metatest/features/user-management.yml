@@ -1,0 +1,28 @@
+feature: User Management
+description: >
+  Core rules for user data integrity. Every user response must carry
+  a valid identity (email + username). Profile completeness rules apply
+  to tests that focus on user detail retrieval.
+
+invariants:
+  /api/v1/users/{id}:
+    GET:
+      invariants:
+        - name: user_has_email
+          field: email
+          is_not_null: true
+
+        - name: user_has_username
+          field: username
+          is_not_null: true
+
+tests:
+  - class: metatest.integration.mockrestapi.UsersTest
+    methods:
+      - testGetUser
+      - testUserMetadata
+      - testUserSubscriptionData
+
+  - class: metatest.integration.mockrestapi.ECommerceApiTest
+    methods:
+      - testGetUserDetails

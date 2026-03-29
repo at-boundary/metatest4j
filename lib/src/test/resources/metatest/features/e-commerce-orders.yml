@@ -1,0 +1,21 @@
+feature: E-Commerce Orders
+description: >
+  Business rules for order creation and retrieval in the e-commerce domain.
+  A newly created order must always have a valid status and customer info.
+
+invariants:
+  /api/v1/orders:
+    POST:
+      invariants:
+        - name: created_order_has_customer_email
+          field: customer.email
+          is_not_null: false
+
+        - name: created_order_status_is_pending
+          field: status
+          equals: test
+
+tests:
+  - class: metatest.integration.mockrestapi.ECommerceApiTest
+    methods:
+      - testCreateOrder

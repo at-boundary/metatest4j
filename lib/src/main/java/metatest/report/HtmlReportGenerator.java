@@ -68,6 +68,7 @@ public class HtmlReportGenerator {
         html.append("  <div class=\"tabs\">\n");
         html.append("    <button class=\"tab-button active\" onclick=\"showTab('fault-simulation')\">Fault Simulation</button>\n");
         html.append("    <button class=\"tab-button\" onclick=\"showTab('gap-analysis')\">Execution Coverage</button>\n");
+        html.append("    <button class=\"tab-button\" onclick=\"showTab('test-matrix')\">Test Matrix</button>\n");
 //        html.append("    <button class=\"tab-button\" onclick=\"showTab('schema-coverage')\">Schema Coverage</button>\n");
         html.append("  </div>\n");
 
@@ -78,6 +79,10 @@ public class HtmlReportGenerator {
 
         html.append("  <div id=\"gap-analysis\" class=\"tab-content\">\n");
         html.append(buildGapAnalysisSection(gapAnalysis));
+        html.append("  </div>\n");
+
+        html.append("  <div id=\"test-matrix\" class=\"tab-content\">\n");
+        html.append(buildTestMatrixSection(faultSimulation));
         html.append("  </div>\n");
 
 //        html.append("  <div id=\"schema-coverage\" class=\"tab-content\">\n");
@@ -641,6 +646,133 @@ public class HtmlReportGenerator {
         }
 
         return section.toString();
+    }
+
+    // ── Test Matrix ───────────────────────────────────────────────────────────
+
+    private static String buildTestMatrixSection(JsonNode faultSimulation) {
+        if (faultSimulation == null || faultSimulation.isNull() || faultSimulation.size() == 0) {
+            return "    <div class=\"empty-state\">No fault simulation data available</div>\n";
+        }
+
+        // Collect all unique test names in insertion order
+        Set<String> testNameSet = new LinkedHashSet<>();
+        faultSimulation.elements().forEachRemaining(epData -> {
+            if (epData.has("contract_faults")) {
+                epData.get("contract_faults").elements()
+                        .forEachRemaining(ftNode -> ftNode.elements()
+                                .forEachRemaining(fd -> extractTestNames(fd, testNameSet)));
+            }
+            if (epData.has("invariant_faults")) {
+                epData.get("invariant_faults").elements()
+                        .forEachRemaining(fd -> extractTestNames(fd, testNameSet));
+            }
+        });
+        List<String> testNames = new ArrayList<>(testNameSet);
+        if (testNames.isEmpty()) {
+            return "    <div class=\"empty-state\">No test data available for matrix</div>\n";
+        }
+
+        StringBuilder s = new StringBuilder();
+        s.append("    <div class=\"section-title\">Test \u00d7 Fault Matrix</div>\n");
+        s.append("    <div class=\"section-subtitle\">"
+                + "\u2713 = fault detected by test &nbsp;&nbsp;"
+                + "\u2717 = fault escaped test &nbsp;&nbsp;"
+                + "&ndash; = test did not exercise this endpoint</div>\n");
+        s.append("    <div class=\"matrix-wrapper\">\n");
+        s.append("    <table class=\"matrix-table\">\n");
+        s.append("      <thead><tr>\n");
+        s.append("        <th class=\"matrix-fault-col\">Endpoint / Fault</th>\n");
+        for (String t : testNames) {
+            s.append("        <th class=\"matrix-test-header\">"
+                    + "<span class=\"matrix-test-name\">" + escapeHtml(t) + "</span></th>\n");
+        }
+        s.append("      </tr></thead>\n");
+        s.append("      <tbody>\n");
+
+        Iterator<Map.Entry<String, JsonNode>> endpoints = faultSimulation.fields();
+        while (endpoints.hasNext()) {
+            Map.Entry<String, JsonNode> epEntry = endpoints.next();
+            String epPath = epEntry.getKey();
+            JsonNode epData = epEntry.getValue();
+
+            int faultCount = 0;
+            if (epData.has("contract_faults")) {
+                Iterator<Map.Entry<String, JsonNode>> it = epData.get("contract_faults").fields();
+                while (it.hasNext()) faultCount += it.next().getValue().size();
+            }
+            if (epData.has("invariant_faults")) faultCount += epData.get("invariant_faults").size();
+            if (faultCount == 0) continue;
+
+            s.append("        <tr class=\"matrix-endpoint-row\">\n");
+            s.append("          <td colspan=\"" + (testNames.size() + 1)
+                    + "\" class=\"matrix-endpoint-label\">" + escapeHtml(epPath) + "</td>\n");
+            s.append("        </tr>\n");
+
+            if (epData.has("contract_faults")) {
+                Iterator<Map.Entry<String, JsonNode>> ftIter = epData.get("contract_faults").fields();
+                while (ftIter.hasNext()) {
+                    Map.Entry<String, JsonNode> ftEntry = ftIter.next();
+                    String faultType = ftEntry.getKey();
+                    Iterator<Map.Entry<String, JsonNode>> fieldIter = ftEntry.getValue().fields();
+                    while (fieldIter.hasNext()) {
+                        Map.Entry<String, JsonNode> fe = fieldIter.next();
+                        s.append(renderMatrixRow(faultType, fe.getKey(), false,
+                                fe.getValue(), testNames));
+                    }
+                }
+            }
+
+            if (epData.has("invariant_faults")) {
+                Iterator<Map.Entry<String, JsonNode>> invIter = epData.get("invariant_faults").fields();
+                while (invIter.hasNext()) {
+                    Map.Entry<String, JsonNode> ie = invIter.next();
+                    s.append(renderMatrixRow(null, ie.getKey(), true,
+                            ie.getValue(), testNames));
+                }
+            }
+        }
+
+        s.append("      </tbody>\n");
+        s.append("    </table>\n");
+        s.append("    </div>\n");
+        return s.toString();
+    }
+
+    private static void extractTestNames(JsonNode faultData, Set<String> names) {
+        JsonNode tb = faultData.path("tested_by");
+        if (tb.isArray()) tb.forEach(n -> names.add(n.asText()));
+    }
+
+    private static String renderMatrixRow(String faultType, String label, boolean isInvariant,
+            JsonNode faultData, List<String> testNames) {
+        Set<String> testedSet = new HashSet<>();
+        Set<String> caughtSet = new HashSet<>();
+        JsonNode tb = faultData.path("tested_by");
+        if (tb.isArray()) tb.forEach(n -> testedSet.add(n.asText()));
+        JsonNode cb = faultData.path("caught_by");
+        if (cb.isArray()) cb.forEach(n -> { if (n.has("test")) caughtSet.add(n.get("test").asText()); });
+
+        StringBuilder row = new StringBuilder();
+        row.append("        <tr class=\"matrix-fault-row\">\n");
+        row.append("          <td class=\"matrix-fault-label\">");
+        if (isInvariant) {
+            row.append("<span class=\"fault-badge invariant-badge\">" + escapeHtml(label) + "</span>");
+        } else {
+            row.append("<span class=\"fault-badge\">" + escapeHtml(faultType) + "</span>&nbsp;");
+            row.append("<code>" + escapeHtml(label) + "</code>");
+        }
+        row.append("</td>\n");
+
+        for (String t : testNames) {
+            String css, sym;
+            if      (!testedSet.contains(t)) { css = "not-tested"; sym = "&ndash;"; }
+            else if (caughtSet.contains(t))  { css = "caught";     sym = "\u2713"; }
+            else                              { css = "escaped";    sym = "\u2717"; }
+            row.append("          <td class=\"matrix-cell " + css + "\">" + sym + "</td>\n");
+        }
+        row.append("        </tr>\n");
+        return row.toString();
     }
 
     private static String buildSchemaCoverageSection(JsonNode schemaCoverage) {
@@ -1535,6 +1667,108 @@ code {
 
 .untested-info p:last-child {
     margin-bottom: 0;
+}
+
+/* ── Test Matrix ──────────────────────────────────────────────────────── */
+
+.matrix-wrapper {
+    overflow-x: auto;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 24px;
+}
+
+.matrix-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card-bg);
+    font-size: 0.875em;
+}
+
+.matrix-fault-col {
+    min-width: 260px;
+    padding: 12px 16px;
+    background: var(--hover-bg);
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-size: 0.8em;
+    border-bottom: 2px solid var(--border-color);
+    border-right: 2px solid var(--border-color);
+    text-align: left;
+}
+
+.matrix-test-header {
+    padding: 8px 6px;
+    background: var(--hover-bg);
+    border-bottom: 2px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+    min-width: 90px;
+    max-width: 130px;
+    vertical-align: bottom;
+    text-align: center;
+}
+
+.matrix-test-name {
+    display: inline-block;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8em;
+    font-weight: 600;
+    color: var(--text-primary);
+    writing-mode: vertical-lr;
+    transform: rotate(180deg);
+    white-space: nowrap;
+    padding: 4px 2px;
+    max-height: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.matrix-endpoint-row td {
+    padding: 8px 16px;
+    background: var(--hover-bg);
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+    color: var(--accent-primary);
+    border-top: 2px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.matrix-fault-label {
+    padding: 10px 16px;
+    border-right: 2px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.matrix-fault-row:last-child .matrix-fault-label,
+.matrix-fault-row:last-child .matrix-cell {
+    border-bottom: none;
+}
+
+.matrix-cell {
+    text-align: center;
+    padding: 10px 6px;
+    font-weight: 700;
+    font-size: 1em;
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.matrix-cell.caught {
+    background: var(--detected-bg);
+    color: var(--detected-text);
+}
+
+.matrix-cell.escaped {
+    background: var(--escaped-bg);
+    color: var(--escaped-text);
+}
+
+.matrix-cell.not-tested {
+    color: var(--text-tertiary);
+    background: var(--bg-primary);
 }
 """;
     }

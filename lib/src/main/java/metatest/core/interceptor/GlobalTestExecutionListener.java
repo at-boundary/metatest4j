@@ -24,6 +24,9 @@ public class GlobalTestExecutionListener implements TestExecutionListener {
             System.out.println("[MetaTest] All tests completed - Generating reports...");
 //            FaultSimulationReport.getInstance().sendResultsToAPI();
 
+            // Print console summary before writing file reports
+            FaultSimulationReport.getInstance().printConsoleSummary();
+
             // Generate JSON reports first
             FaultSimulationReport.getInstance().createJSONReport();
             Collector.saveCoverageReport();

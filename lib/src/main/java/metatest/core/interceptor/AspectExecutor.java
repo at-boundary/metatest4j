@@ -35,7 +35,7 @@ public class AspectExecutor {
 
         // Resolve per-test config (lazy-loaded, cached per class)
         Optional<TestScopedConfig> classConfig = TestScopedConfigCache.getInstance().get(testClass);
-        ResolvedTestConfig resolvedConfig = ConfigResolver.resolve(classConfig, methodName);
+        ResolvedTestConfig resolvedConfig = ConfigResolver.resolve(testClass, classConfig, methodName);
 
         // Short-circuit: test is excluded from simulation via .metatest.yml
         if (resolvedConfig.isSkip()) {

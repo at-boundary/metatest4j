@@ -129,6 +129,101 @@ public class FaultSimulationReport {
         caughtFaults.clear();
     }
 
+    /**
+     * Prints a per-test summary to stdout after all simulations complete.
+     * Shows overall detection rate and, for each test, caught vs escaped fault counts.
+     * Tests with escaped faults are listed first; escaped fault descriptions follow each test.
+     */
+    public void printConsoleSummary() {
+        Map<String, int[]> perTestStats = new LinkedHashMap<>();  // testName -> [caught, total]
+        Map<String, List<String>> perTestEscaped = new LinkedHashMap<>();
+        int globalTotal = 0;
+        int globalCaught = 0;
+
+        for (Map.Entry<String, EndpointFaultResults> epEntry : report.entrySet()) {
+            String endpoint = epEntry.getKey();
+            EndpointFaultResults results = epEntry.getValue();
+
+            for (Map.Entry<String, Map<String, FaultSimulationResult>> ftEntry
+                    : results.getContractFaults().entrySet()) {
+                String faultType = ftEntry.getKey();
+                for (Map.Entry<String, FaultSimulationResult> fieldEntry
+                        : ftEntry.getValue().entrySet()) {
+                    globalTotal++;
+                    if (fieldEntry.getValue().isCaughtByAnyTest()) globalCaught++;
+                    String desc = endpoint + " [" + faultType + ":" + fieldEntry.getKey() + "]";
+                    accumulatePerTest(fieldEntry.getValue(), desc, perTestStats, perTestEscaped);
+                }
+            }
+
+            for (Map.Entry<String, FaultSimulationResult> invEntry
+                    : results.getInvariantFaults().entrySet()) {
+                globalTotal++;
+                if (invEntry.getValue().isCaughtByAnyTest()) globalCaught++;
+                String desc = endpoint + " [invariant:" + invEntry.getKey() + "]";
+                accumulatePerTest(invEntry.getValue(), desc, perTestStats, perTestEscaped);
+            }
+        }
+
+        if (globalTotal == 0) return;
+
+        double rate = globalCaught * 100.0 / globalTotal;
+        String sep = "=".repeat(70);
+        String div = "-".repeat(70);
+
+        System.out.println();
+        System.out.println(sep);
+        System.out.println(" Metatest -- Simulation Run Summary");
+        System.out.println(sep);
+        System.out.printf(" Overall: %d total  |  %d detected (%.0f%%)  |  %d escaped%n",
+                globalTotal, globalCaught, rate, globalTotal - globalCaught);
+
+        if (!perTestStats.isEmpty()) {
+            List<Map.Entry<String, int[]>> sorted = new ArrayList<>(perTestStats.entrySet());
+            sorted.sort((a, b) -> Integer.compare(
+                    b.getValue()[1] - b.getValue()[0],
+                    a.getValue()[1] - a.getValue()[0]));
+
+            System.out.println(div);
+            System.out.printf(" %-36s  %6s  %5s  %7s%n", "Test", "Caught", "Total", "Escaped");
+            System.out.println(div);
+            for (Map.Entry<String, int[]> entry : sorted) {
+                int caught  = entry.getValue()[0];
+                int total   = entry.getValue()[1];
+                int escaped = total - caught;
+                System.out.printf(" %-36s  %6d  %5d  %7d%n",
+                        entry.getKey(), caught, total, escaped);
+                if (escaped > 0) {
+                    List<String> ef = perTestEscaped.get(entry.getKey());
+                    if (ef != null) {
+                        for (String fault : ef) System.out.println("   [X] " + fault);
+                    }
+                }
+            }
+        }
+
+        System.out.println(sep);
+        System.out.println();
+    }
+
+    private void accumulatePerTest(FaultSimulationResult result, String faultDesc,
+            Map<String, int[]> perTestStats, Map<String, List<String>> perTestEscaped) {
+        Set<String> caughtTests = new HashSet<>();
+        for (TestLevelSimulationResults ts : result.getCaughtBy()) {
+            caughtTests.add(ts.getTest());
+        }
+        for (String testName : result.getTestedBy()) {
+            perTestStats.computeIfAbsent(testName, k -> new int[]{0, 0});
+            perTestEscaped.computeIfAbsent(testName, k -> new ArrayList<>());
+            perTestStats.get(testName)[1]++;
+            if (caughtTests.contains(testName)) {
+                perTestStats.get(testName)[0]++;
+            } else {
+                perTestEscaped.get(testName).add(faultDesc);
+            }
+        }
+    }
+
     private String buildContractFaultKey(String endpoint, String faultType, String field) {
         return endpoint + "|contract|" + faultType + "|" + field;
     }

@@ -1,42 +1,23 @@
 version: "1.0"
 
-# ── Class-level overrides ─────────────────────────────────────────────────────
-# Applied to ALL tests in ECommerceApiTest
-
+# Class-level settings override
 settings:
-  # Global config has stop_on_first_catch: true — override here to get full
-  # per-test fault coverage for this class
   stop_on_first_catch: false
 
 faults:
-  # Enable empty_list for this class (disabled globally)
   empty_list: { enabled: true }
 
-# Class-level invariants applied to all tests in this class that hit these endpoints.
-# Note: endpoint keys must match the normalized path produced by EndpointPatternNormalizer.
-# Numeric segment IDs (e.g. /users/1001) normalize to {id}.
-endpoints:
-  /api/v1/users/{id}:
-    GET:
-      invariants:
-        - name: ecommerce_user_has_email
-          field: email
-          is_not_null: true
-
-        - name: ecommerce_user_has_username
-          field: username
-          is_not_null: true
-
 # ── Method-level overrides ────────────────────────────────────────────────────
+# Note: user and order invariants are defined in metatest/features/ and applied
+# automatically to the relevant methods via test mappings in those files.
 
 tests:
 
-  # testGetUsersList has assertNull(thirdUserAvatar) — explicit null expectation
-  # that would interact unpredictably with null/missing field mutations. Exclude it.
+  # testGetUsersList asserts assertNull(thirdUserAvatar) — explicit null expectation
+  # that would interact unpredictably with null/missing mutations.
   testGetUsersList:
     exclude: true
 
-  # testGetOrdersList response is a paginated wrapper object; exclude from simulation
-  # to keep focus on single-resource endpoints
+  # testGetOrdersList is a paginated list endpoint; skip to reduce noise.
   testGetOrdersList:
     exclude: true

@@ -8,33 +8,40 @@ import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
- * Merges global SimulatorConfig with a per-test-class TestScopedConfig and optional
- * per-method TestMethodConfig into a single ResolvedTestConfig for use during simulation.
+ * Merges all configuration sources into a single ResolvedTestConfig for simulation.
+ *
+ * Merge order (all additive for invariants, most-specific-wins for everything else):
+ *   1. global config.yml
+ *   2. features/*.yml        (invariants only — additive)
+ *   3. ClassName.metatest.yml class-level
+ *   4. ClassName.metatest.yml method-level  (most specific)
  *
  * Merging rules:
- *   - invariants:  additive  (global + class-level + method-level all contribute)
+ *   - invariants:  additive  (all levels contribute)
  *   - faults:      override  (most specific level wins per fault type)
  *   - settings:    override  (most specific level wins per field)
  *   - exclusions:  additive  (union of all levels)
- *
- * Method matching order: exact name → wildcard pattern (most specific wildcard wins)
  */
 public class ConfigResolver {
 
     /**
      * Resolves the effective configuration for a specific test method execution.
      *
-     * @param classConfig Optional class-level config from .metatest.yml (empty if no file found)
+     * @param testClass   The test class being intercepted (used for feature lookup)
+     * @param classConfig Optional class-level config from ClassName.metatest.yml
      * @param methodName  The @Test method name being executed
      * @return Fully resolved, immutable config ready for the simulation pipeline
      */
-    public static ResolvedTestConfig resolve(Optional<TestScopedConfig> classConfig, String methodName) {
-        if (classConfig.isEmpty()) {
-            return buildFromGlobalOnly();
-        }
+    public static ResolvedTestConfig resolve(
+            Class<?> testClass,
+            Optional<TestScopedConfig> classConfig,
+            String methodName) {
 
-        TestScopedConfig scopedConfig = classConfig.get();
-        TestMethodConfig methodConfig = findMethodConfig(scopedConfig, methodName);
+        // Load features that apply to this test (may be empty)
+        List<FeatureConfig> features = FeatureConfigCache.getInstance().getFeaturesFor(testClass, methodName);
+
+        TestScopedConfig scopedConfig = classConfig.orElse(null);
+        TestMethodConfig methodConfig = scopedConfig != null ? findMethodConfig(scopedConfig, methodName) : null;
 
         // Short-circuit: test is explicitly excluded from simulation
         if (methodConfig != null && methodConfig.isExclude()) {
@@ -44,7 +51,7 @@ public class ConfigResolver {
         boolean stopOnFirstCatch = resolveStopOnFirstCatch(scopedConfig, methodConfig);
         String defaultQuantifier = resolveDefaultQuantifier(scopedConfig, methodConfig);
         List<FaultCollection> enabledFaults = resolveEnabledFaults(scopedConfig, methodConfig);
-        Map<String, List<InvariantConfig>> mergedInvariants = mergeInvariants(scopedConfig, methodConfig);
+        Map<String, List<InvariantConfig>> mergedInvariants = mergeInvariants(features, scopedConfig, methodConfig);
         List<Pattern> excludedPatterns = mergeExcludedEndpointPatterns(scopedConfig, methodConfig);
 
         return new ResolvedTestConfig(
@@ -81,7 +88,7 @@ public class ConfigResolver {
         for (Map.Entry<String, TestMethodConfig> entry : scopedConfig.tests.entrySet()) {
             String pattern = entry.getKey();
             if (!pattern.contains("*") && !pattern.contains("?")) {
-                continue; // exact-only patterns were already checked
+                continue;
             }
             if (globMatches(pattern, methodName)) {
                 int wildcardCount = countWildcards(pattern);
@@ -111,38 +118,29 @@ public class ConfigResolver {
     // ── Settings resolution ───────────────────────────────────────────────────
 
     private static boolean resolveStopOnFirstCatch(TestScopedConfig classConfig, TestMethodConfig methodConfig) {
-        // Method-level
         if (methodConfig != null && methodConfig.settings != null) {
             return methodConfig.settings.stop_on_first_catch;
         }
-        // Class-level
-        if (classConfig.settings != null) {
+        if (classConfig != null && classConfig.settings != null) {
             return classConfig.settings.stop_on_first_catch;
         }
-        // Global fallback
         return SimulatorConfig.isStopOnFirstCatchEnabled();
     }
 
     private static String resolveDefaultQuantifier(TestScopedConfig classConfig, TestMethodConfig methodConfig) {
-        // Method-level
         if (methodConfig != null && methodConfig.settings != null
                 && methodConfig.settings.default_quantifier != null) {
             return methodConfig.settings.default_quantifier;
         }
-        // Class-level
-        if (classConfig.settings != null && classConfig.settings.default_quantifier != null) {
+        if (classConfig != null && classConfig.settings != null
+                && classConfig.settings.default_quantifier != null) {
             return classConfig.settings.default_quantifier;
         }
-        // Global fallback
         return SimulatorConfig.getDefaultQuantifier();
     }
 
     // ── Fault resolution ──────────────────────────────────────────────────────
 
-    /**
-     * Resolves the enabled fault list.
-     * For each FaultCollection value: method-level override → class-level override → global list.
-     */
     private static List<FaultCollection> resolveEnabledFaults(
             TestScopedConfig classConfig, TestMethodConfig methodConfig) {
 
@@ -152,15 +150,12 @@ public class ConfigResolver {
         for (FaultCollection fault : FaultCollection.values()) {
             Boolean enabled = null;
 
-            // Method-level fault override (most specific)
             if (methodConfig != null && methodConfig.faults != null) {
                 enabled = methodConfig.faults.getEnabled(fault);
             }
-            // Class-level fault override
-            if (enabled == null && classConfig.faults != null) {
+            if (enabled == null && classConfig != null && classConfig.faults != null) {
                 enabled = classConfig.faults.getEnabled(fault);
             }
-            // Fall back to global enabled faults
             if (enabled == null) {
                 enabled = globalFaults.contains(fault);
             }
@@ -176,27 +171,35 @@ public class ConfigResolver {
     // ── Invariant merging ─────────────────────────────────────────────────────
 
     /**
-     * Builds the additive map of invariants:
-     *   global config.yml  +  class-level .metatest.yml  +  method-level override
-     *
-     * All three levels contribute; duplicates (same invariant name) are NOT deduplicated
-     * to keep the merge logic simple and predictable.
+     * Merges invariants from all four levels (additive — all contribute):
+     *   1. global config.yml
+     *   2. features/*.yml  (each matching feature adds its invariants)
+     *   3. class-level ClassName.metatest.yml
+     *   4. method-level ClassName.metatest.yml
      */
     private static Map<String, List<InvariantConfig>> mergeInvariants(
-            TestScopedConfig classConfig, TestMethodConfig methodConfig) {
+            List<FeatureConfig> features,
+            TestScopedConfig classConfig,
+            TestMethodConfig methodConfig) {
 
         Map<String, List<InvariantConfig>> result = new HashMap<>();
 
-        // 1. Global invariants from config.yml
-        Map<String, Map<String, MethodInvariantsConfig>> globalEndpoints = SimulatorConfig.getAllEndpointInvariants();
-        addEndpointInvariants(globalEndpoints, result);
+        // 1. Global
+        addEndpointInvariants(SimulatorConfig.getAllEndpointInvariants(), result);
 
-        // 2. Class-level invariants from .metatest.yml
-        if (classConfig.endpoints != null) {
+        // 2. Features (each feature contributes independently)
+        for (FeatureConfig feature : features) {
+            if (feature.getInvariants() != null) {
+                addEndpointInvariants(feature.getInvariants(), result);
+            }
+        }
+
+        // 3. Class-level
+        if (classConfig != null && classConfig.endpoints != null) {
             addEndpointInvariants(classConfig.endpoints, result);
         }
 
-        // 3. Method-level invariants (most specific, added last)
+        // 4. Method-level
         if (methodConfig != null && methodConfig.endpoints != null) {
             addEndpointInvariants(methodConfig.endpoints, result);
         }
@@ -204,7 +207,7 @@ public class ConfigResolver {
         return result;
     }
 
-    private static void addEndpointInvariants(
+    static void addEndpointInvariants(
             Map<String, Map<String, MethodInvariantsConfig>> source,
             Map<String, List<InvariantConfig>> target) {
 
@@ -233,7 +236,8 @@ public class ConfigResolver {
 
         List<String> patterns = new ArrayList<>();
 
-        if (classConfig.exclusions != null && classConfig.exclusions.endpoints != null) {
+        if (classConfig != null && classConfig.exclusions != null
+                && classConfig.exclusions.endpoints != null) {
             patterns.addAll(classConfig.exclusions.endpoints);
         }
         if (methodConfig != null && methodConfig.exclusions != null
@@ -251,25 +255,5 @@ public class ConfigResolver {
             compiled.add(Pattern.compile(regex));
         }
         return compiled;
-    }
-
-    // ── Global-only fallback ──────────────────────────────────────────────────
-
-    /**
-     * Wraps global config values in a ResolvedTestConfig when no .metatest.yml is present.
-     * Invariants come directly from SimulatorConfig; no exclusions are added.
-     */
-    private static ResolvedTestConfig buildFromGlobalOnly() {
-        Map<String, List<InvariantConfig>> invariants = new HashMap<>();
-        addEndpointInvariants(SimulatorConfig.getAllEndpointInvariants(), invariants);
-
-        return new ResolvedTestConfig(
-                false,
-                SimulatorConfig.isStopOnFirstCatchEnabled(),
-                SimulatorConfig.getDefaultQuantifier(),
-                SimulatorConfig.getEnabledFaults(),
-                invariants,
-                List.of()
-        );
     }
 }
