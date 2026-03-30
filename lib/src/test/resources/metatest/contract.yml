@@ -1,0 +1,19 @@
+version: "1.0"
+
+# Global settings
+settings:
+  default_quantifier: all
+  # Skip simulation for other tests once a test catches the fault
+  stop_on_first_catch: true
+
+# Global contract-level fault injection types.
+# Invariants (business rules) are defined in metatest/features/ and per-test .metatest.yml files.
+contract:
+  null_field:
+    enabled: true
+  missing_field:
+    enabled: true
+  empty_list:
+    enabled: false
+  empty_string:
+    enabled: false

@@ -4,7 +4,7 @@ version: "1.0"
 settings:
   stop_on_first_catch: false
 
-faults:
+contract:
   empty_list: { enabled: true }
 
 # ── Method-level overrides ────────────────────────────────────────────────────

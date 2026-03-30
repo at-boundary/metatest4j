@@ -80,8 +80,14 @@ public class InvariantSimulator {
             if (!originalResult.isSatisfied()) {
                 System.out.printf("  [WARN] Original response already violates invariant '%s': %s%n",
                         invariantName, originalResult.getMessage());
-                // Record that the original already violates
-                // Skip simulation for this invariant
+                // The test passed on a response that already violates this invariant — assertion gap.
+                // Record as not caught so it appears in the report.
+                TestLevelSimulationResults skippedResult = new TestLevelSimulationResults();
+                skippedResult.setTest(testName);
+                skippedResult.setCaught(false);
+                skippedResult.setError("[ORIGINAL VIOLATION] Baseline response already fails this invariant: "
+                        + originalResult.getMessage());
+                REPORT.recordInvariantResult(endpointPattern, invariantName, skippedResult);
                 continue;
             }
 
@@ -91,6 +97,12 @@ public class InvariantSimulator {
             if (mutations.isEmpty()) {
                 System.out.printf("  [INFO] No mutations generated for invariant '%s' (may be conditional with unmet precondition)%n",
                         invariantName);
+                // Record so the invariant is visible in the report even when not exercised.
+                TestLevelSimulationResults skippedResult = new TestLevelSimulationResults();
+                skippedResult.setTest(testName);
+                skippedResult.setCaught(false);
+                skippedResult.setError("[NOT APPLICABLE] No mutations could be generated (conditional invariant with unmet precondition)");
+                REPORT.recordInvariantResult(endpointPattern, invariantName, skippedResult);
                 continue;
             }
 

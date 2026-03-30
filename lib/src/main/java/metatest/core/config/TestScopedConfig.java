@@ -22,10 +22,10 @@ public class TestScopedConfig {
     public SimulatorConfig.Settings settings;
 
     /**
-     * Class-level fault overrides.
-     * Unspecified faults fall back to global config.yml values.
+     * Class-level contract (fault injection) overrides.
+     * Unspecified faults fall back to global contract.yml values.
      */
-    public FaultsOverride faults;
+    public ContractOverride contract;
 
     /**
      * Class-level endpoint invariants.
@@ -45,11 +45,11 @@ public class TestScopedConfig {
     public Map<String, TestMethodConfig> tests = new HashMap<>();
 
     /**
-     * Fault enable/disable overrides.
+     * Contract (fault injection) enable/disable overrides.
      * Each fault type is optional — if absent, falls back to the parent level.
      */
     @Data
-    public static class FaultsOverride {
+    public static class ContractOverride {
         public FaultSwitch null_field;
         public FaultSwitch missing_field;
         public FaultSwitch empty_list;

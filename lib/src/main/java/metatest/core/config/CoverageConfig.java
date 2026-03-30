@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
 public class CoverageConfig {
 
     private static CoverageConfig INSTANCE;
-    private static final String CONFIG_FILE = "coverage_config.yml";
+    private static final String CONFIG_FILE = "metatest/coverage_config.yml";
 
     private Coverage coverage;
 

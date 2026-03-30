@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
  *
  * Merging rules:
  *   - invariants:  additive  (all levels contribute)
- *   - faults:      override  (most specific level wins per fault type)
+ *   - contract:    override  (most specific level wins per fault type)
  *   - settings:    override  (most specific level wins per field)
  *   - exclusions:  additive  (union of all levels)
  */
@@ -150,11 +150,11 @@ public class ConfigResolver {
         for (FaultCollection fault : FaultCollection.values()) {
             Boolean enabled = null;
 
-            if (methodConfig != null && methodConfig.faults != null) {
-                enabled = methodConfig.faults.getEnabled(fault);
+            if (methodConfig != null && methodConfig.contract != null) {
+                enabled = methodConfig.contract.getEnabled(fault);
             }
-            if (enabled == null && classConfig != null && classConfig.faults != null) {
-                enabled = classConfig.faults.getEnabled(fault);
+            if (enabled == null && classConfig != null && classConfig.contract != null) {
+                enabled = classConfig.contract.getEnabled(fault);
             }
             if (enabled == null) {
                 enabled = globalFaults.contains(fault);

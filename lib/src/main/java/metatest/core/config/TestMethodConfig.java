@@ -22,7 +22,7 @@ import java.util.Map;
  *               is_not_null: true
  *
  *   "testGet*":
- *     faults:
+ *     contract:
  *       empty_list: { enabled: true }
  *
  *   testHealthCheck:
@@ -42,10 +42,10 @@ public class TestMethodConfig {
     public SimulatorConfig.Settings settings;
 
     /**
-     * Method-level fault overrides.
-     * Merged over class-level and global faults (most specific wins per fault type).
+     * Method-level contract (fault injection) overrides.
+     * Merged over class-level and global contract settings (most specific wins per fault type).
      */
-    public TestScopedConfig.FaultsOverride faults;
+    public TestScopedConfig.ContractOverride contract;
 
     /**
      * Method-level endpoint invariants.

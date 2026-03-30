@@ -36,14 +36,18 @@ public class MetaTestConfig {
         Properties props = new Properties();
         
         // Try to load from classpath
-        try (InputStream is = getClass().getClassLoader().getResourceAsStream("metatest.properties")) {
-            if (is != null) {
-                props.load(is);
-                System.out.println("Loaded Metatest configuration from metatest.properties");
+        // Preferred location: metatest/metatest.properties. Fall back to root-level for backward compat.
+        String[] candidates = {"metatest/metatest.properties", "metatest.properties"};
+        for (String path : candidates) {
+            try (InputStream is = getClass().getClassLoader().getResourceAsStream(path)) {
+                if (is != null) {
+                    props.load(is);
+                    System.out.println("[Metatest] Loaded configuration from " + path);
+                    break;
+                }
+            } catch (IOException e) {
+                System.out.println("[Metatest] Could not load " + path + ": " + e.getMessage());
             }
-        } catch (IOException e) {
-            // Properties file not found or not readable, continue with other methods
-            System.out.println("No metatest.properties found, using system properties and environment variables");
         }
         
         return props;

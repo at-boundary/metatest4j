@@ -27,9 +27,10 @@ public class SimulatorConfig {
     public Map<String, Map<String, MethodInvariantsConfig>> endpoints = new HashMap<>();
 
     /**
-     * Legacy fault injection settings
+     * Global contract-level fault injection settings.
+     * Defined in contract.yml under the `contract:` key.
      */
-    public Faults faults;
+    public Contract contract;
 
     /**
      * Simulation behavior settings
@@ -54,7 +55,7 @@ public class SimulatorConfig {
     public Tests tests;
 
     @Data
-    public static class Faults {
+    public static class Contract {
         static class Fault {
             public boolean enabled;
         }
@@ -312,6 +313,10 @@ public class SimulatorConfig {
             configSourceType = System.getenv("METATEST_CONFIG_SOURCE");
         }
 
+        if (configSourceType == null) {
+            configSourceType = readConfigSourceFromPropertiesFile();
+        }
+
         ConfigurationSource source;
 
         if ("local".equalsIgnoreCase(configSourceType)) {
@@ -334,6 +339,20 @@ public class SimulatorConfig {
 
         System.out.println("Configuration source initialized: " + source.getSourceName());
         return source;
+    }
+
+    private static String readConfigSourceFromPropertiesFile() {
+        String[] paths = {"metatest/metatest.properties", "metatest.properties"};
+        for (String path : paths) {
+            try (java.io.InputStream is = SimulatorConfig.class.getClassLoader().getResourceAsStream(path)) {
+                if (is == null) continue;
+                java.util.Properties props = new java.util.Properties();
+                props.load(is);
+                String value = props.getProperty("metatest.config.source");
+                if (value != null && !value.trim().isEmpty()) return value.trim();
+            } catch (java.io.IOException ignored) {}
+        }
+        return null;
     }
 
     public static List<FaultCollection> getEnabledFaults(){

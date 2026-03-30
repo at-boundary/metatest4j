@@ -61,19 +61,20 @@ public class LocalConfigurationSource implements ConfigurationSource {
     private SimulatorConfig loadConfig() {
         ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
 
-        try (InputStream is = getClass().getClassLoader().getResourceAsStream("config.yml")) {
-            if (is == null) {
-                throw new RuntimeException("config.yml not found in classpath. " +
-                        "For local configuration mode, config.yml must be present in src/main/resources/");
+        // Preferred location: metatest/contract.yml. Fall back to root-level for backward compat.
+        String[] candidates = {"metatest/contract.yml", "contract.yml", "config.yml"};
+        for (String filename : candidates) {
+            try (InputStream is = getClass().getClassLoader().getResourceAsStream(filename)) {
+                if (is == null) continue;
+                SimulatorConfig config = mapper.readValue(is, SimulatorConfig.class);
+                System.out.println("[Metatest] Loaded configuration from " + filename);
+                return config;
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to parse " + filename, e);
             }
-
-            SimulatorConfig config = mapper.readValue(is, SimulatorConfig.class);
-            System.out.println("Loaded Metatest configuration from config.yml");
-            return config;
-
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to parse config.yml", e);
         }
+        throw new RuntimeException("No contract.yml found in classpath. " +
+                "Create src/test/resources/metatest/contract.yml to configure fault injection.");
     }
 
     private List<Pattern> compilePatterns(List<String> patterns) {
@@ -97,31 +98,31 @@ public class LocalConfigurationSource implements ConfigurationSource {
     public List<FaultCollection> getEnabledFaults() {
         List<FaultCollection> enabledFaults = new ArrayList<>();
 
-        if (config.faults == null) {
-            System.out.println("No faults section found in config.yml");
+        if (config.contract == null) {
+            System.out.println("[Metatest] No contract section found in contract.yml");
             return enabledFaults;
         }
 
-        if (config.faults.null_field != null && config.faults.null_field.enabled) {
+        if (config.contract.null_field != null && config.contract.null_field.enabled) {
             enabledFaults.add(FaultCollection.null_field);
         }
-        if (config.faults.missing_field != null && config.faults.missing_field.enabled) {
+        if (config.contract.missing_field != null && config.contract.missing_field.enabled) {
             enabledFaults.add(FaultCollection.missing_field);
         }
-        if (config.faults.empty_list != null && config.faults.empty_list.enabled) {
+        if (config.contract.empty_list != null && config.contract.empty_list.enabled) {
             enabledFaults.add(FaultCollection.empty_list);
         }
-        if (config.faults.empty_string != null && config.faults.empty_string.enabled) {
+        if (config.contract.empty_string != null && config.contract.empty_string.enabled) {
             enabledFaults.add(FaultCollection.empty_string);
         }
-        if (config.faults.invalid_value != null && config.faults.invalid_value.enabled) {
+        if (config.contract.invalid_value != null && config.contract.invalid_value.enabled) {
             enabledFaults.add(FaultCollection.invalid_value);
         }
-        if (config.faults.http_method_change != null && config.faults.http_method_change.enabled) {
+        if (config.contract.http_method_change != null && config.contract.http_method_change.enabled) {
             enabledFaults.add(FaultCollection.http_method_change);
         }
 
-        System.out.println("Enabled faults from config.yml: " + enabledFaults);
+        System.out.println("[Metatest] Enabled faults from contract.yml: " + enabledFaults);
         return enabledFaults;
     }
 
