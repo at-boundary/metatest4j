@@ -4,25 +4,33 @@
 >
 > This project is currently in experimental/development phase. Features and APIs may change between versions.
 
-Metatest validates REST API test reliability through systematic fault injection and bytecode-level response manipulation.
+Metatest measures the effectiveness and defect detection capabilities of REST API tests.
+
+It takes the **evaluation posture from mutation testing** and the **specification posture from property-based testing**:
+- Drawing from Property Based Testing: invariants are first-class specifications. The mutation space is derived from them, not from code grammar.
+- Drawing from Mutation Testing: the goal is evaluating whether tests catch corruptions, not finding bugs in the implementation.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Problem Statement](#problem-statement)
+- [How Metatest Differs from PIT and Property-Based Testing](#how-metatest-differs-from-pit-and-property-based-testing)
 - [Architecture](#architecture)
 - [Technical Implementation](#technical-implementation)
 - [Configuration](#configuration)
+  - [Directory Structure](#directory-structure)
+  - [contract.yml](#contractyml)
+  - [Feature Files](#feature-files)
+  - [metatest.properties](#metatestproperties)
+  - [coverage_config.yml](#coverage_configyml)
 - [Invariants DSL Reference](#invariants-dsl-reference)
   - [Supported Operators](#supported-operators)
   - [Field References](#field-references)
   - [Array Fields](#array-fields)
   - [Conditional Invariants](#conditional-invariants-ifthen)
-  - [Complete Example](#complete-example-for-any-api)
 - [Installation](#installation)
 - [Reports and Analytics](#reports-and-analytics)
 - [Integration with CI/CD](#integration-with-cicd)
-- [Use Cases](#use-cases)
 - [Performance Considerations](#performance-considerations)
 - [Requirements](#requirements)
 - [Troubleshooting](#troubleshooting)
@@ -38,7 +46,51 @@ The framework operates transparently through AspectJ bytecode weaving, requiring
 
 Traditional test coverage metrics measure code execution paths but fail to assess assertion quality. A test with 100% code coverage may still pass when the API returns incorrect data, null values, or missing fields.
 
-Metatest addresses this by answering: "Would your tests catch real API contract violations?"
+Metatest addresses this gap by separating two concerns:
+
+- **Contract faults** — structural mutations (null fields, missing fields) that test whether your assertions check field presence
+- **Invariant faults** — business rule violations (negative prices, invalid status values, broken timestamps) that test whether your assertions check semantic correctness
+
+Invariants are the primary artifact. They are both the specification of what your API must always guarantee, and the blueprint for what mutations to generate.
+
+## How Metatest Differs from PIT and Property-Based Testing
+
+Metatest occupies a specific intersection in the testing tool landscape that is worth making explicit.
+
+### PIT / Stryker — mutation testing for source code
+
+PIT mutates **source code syntax**: flip `>` to `>=`, negate a return value, delete a branch, replace a constant. The mutations are grammar-level, not meaning-level. No concept of business semantics, no invariants. Your tests either catch the syntactic corruption or they don't.
+
+PIT answers: *"Do your unit tests catch code-level regressions?"*
+
+### Property-Based Testing (QuickCheck, jqwik, Hypothesis)
+
+You define a **property** — a universally quantified claim like *"for any valid email, `parse(email).toString() == email`"* — and the framework generates random inputs trying to falsify it, then shrinks failing cases to a minimal counterexample. It explores the input space against a stated specification. No mutation of code. No evaluation of test quality.
+
+PBT answers: *"Does your implementation hold for all inputs?"*
+
+### Where Metatest sits
+
+|  | PIT | PBT | Metatest |
+|---|---|---|---|
+| **Goal** | Evaluate tests | Find implementation bugs | Evaluate tests |
+| **Method** | Corrupt the code | Generate adversarial inputs | Generate adversarial responses |
+| **Driven by** | Code grammar | Property definitions | Invariant definitions |
+| **Output** | Mutation score | Counterexample | Fault detection score per invariant |
+| **Specification needed** | No | Yes | Yes |
+
+
+### Value mutations
+
+Current mutations are structural: null the field, remove the field. Property-guided mutation goes further by generating **boundary-crossing values derived from the invariant's own constraint**:
+
+- `price > 0` → also inject `0`, `-1`, `NaN`
+- `status in [ACTIVE, SUSPENDED]` → also inject `"DELETED"`, `"active"` (wrong case), `""`
+- `created_at <= updated_at` → also inject a response where `updated_at` precedes `created_at` by one second
+
+The invariant tells you the exact semantic boundary. Generate values that cross it. This is the PBT falsification idea applied to API response data rather than function inputs — and it makes invariants far more powerful than traditional contract testing tools that only verify field presence.
+
+---
 
 ## Architecture
 
@@ -53,27 +105,26 @@ metatest-rest-java/
 │   │   │   └── TestContext       # Thread-local execution context
 │   │   ├── config/               # Configuration management
 │   │   │   ├── LocalConfigurationSource   # YAML-based config
-│   │   │   └── ApiConfigurationSource     # Cloud API config
+│   │   │   ├── ApiConfigurationSource     # Cloud API config
+│   │   │   ├── FeatureConfigScanner       # Feature file loader
+│   │   │   └── FeatureConfigCache         # Parsed invariant cache
 │   │   └── normalizer/           # Endpoint pattern normalization
 │   ├── injection/                # Fault injection strategies
 │   │   ├── NullFieldStrategy     # Set fields to null
 │   │   ├── MissingFieldStrategy  # Remove fields entirely
 │   │   ├── EmptyListStrategy     # Empty arrays/collections
 │   │   └── EmptyStringStrategy   # Empty string values
+│   ├── invariant/                # Invariant evaluation engine
+│   │   ├── InvariantSimulator    # Generates and tests invariant mutations
+│   │   └── FieldExtractor        # JSONPath-based field resolution
 │   ├── simulation/               # Test execution engine
 │   │   ├── Runner                # Fault simulation orchestrator
-│   │   └── FaultSimulationReport # Results aggregation
+│   │   └── FaultSimulationReport # Results aggregation and reporting
 │   ├── coverage/                 # Endpoint coverage tracking
-│   │   ├── Collector             # HTTP call logging
-│   │   └── EndpointMethodCoverage # Per-endpoint metrics
-│   ├── analytics/                # Test quality analysis
-│   │   ├── GapAnalyzer           # Identify untested paths
-│   │   └── AssertionAnalytics    # Assertion strength metrics
+│   ├── analytics/                # Gap analysis
 │   ├── http/                     # HTTP abstraction layer
-│   │   └── HTTPFactory           # Request/Response wrappers
 │   └── api/                      # Cloud API integration
 └── gradle-plugin/                # Gradle plugin for zero-config setup
-    └── MetatestPlugin            # Automatic AspectJ configuration
 ```
 
 ## Technical Implementation
@@ -82,24 +133,15 @@ metatest-rest-java/
 
 Metatest uses compile-time and load-time weaving to intercept:
 
-1. **Test method execution** - `@Around("execution(@org.junit.jupiter.api.Test * *(..))")`
+1. **Test method execution** — `@Around("execution(@org.junit.jupiter.api.Test * *(..))")`
    - Establishes thread-local test context
    - Captures baseline test execution
    - Triggers fault simulation after successful baseline
 
-2. **HTTP client calls** - `@Around("execution(* org.apache.http.impl.client.CloseableHttpClient.execute(..))")`
+2. **HTTP client calls** — `@Around("execution(* org.apache.http.impl.client.CloseableHttpClient.execute(..))")`
    - Intercepts Apache HttpClient requests
    - Captures request/response pairs
    - Injects faulty responses during simulation runs
-
-### Thread Safety
-
-Each test execution maintains isolated state via `ThreadLocal<TestContext>`:
-- Original request/response pair
-- Simulated faulty response
-- Test metadata (name, endpoint, method)
-
-Context is cleared after each test to prevent memory leaks and cross-test contamination.
 
 ### Fault Injection Strategies
 
@@ -110,87 +152,53 @@ Context is cleared after each test to prevent memory leaks and cross-test contam
 | `EmptyListStrategy` | Replace array with `[]` | Tests collection size assertions |
 | `EmptyStringStrategy` | Replace string with `""` | Tests non-empty string validation |
 
-Each strategy operates on the parsed JSON response map before re-serialization.
-
 ### Simulation Algorithm
 
-```java
-for (String field : responseFields) {
-    for (FaultType fault : enabledFaults) {
-        Response faultyResponse = applyFault(originalResponse, field, fault);
-        context.setSimulatedResponse(faultyResponse);
-
-        try {
-            testMethod.rerun();
-            // Test passed with faulty data → ESCAPED FAULT
-            report.recordEscapedFault(endpoint, field, fault, testName);
-        } catch (AssertionError e) {
-            // Test failed as expected → DETECTED FAULT
-            report.recordDetectedFault(endpoint, field, fault, testName);
-        }
-    }
-}
 ```
+for each test that exercises endpoint E:
+    baseline = run test, capture response
+    for each contract fault type:
+        for each field in response:
+            inject fault → re-run test → record caught/escaped
+    for each invariant defined on E:
+        generate mutation that violates the invariant
+        re-run test → record caught/escaped
+```
+
+---
 
 ## Configuration
 
-Create `src/main/resources/config.yml`:
+All Metatest configuration lives in `src/test/resources/metatest/`:
+
+### Directory Structure
+
+```
+src/test/resources/
+└── metatest/
+    ├── contract.yml          # Global fault settings and exclusions
+    ├── metatest.properties   # API key and connection settings (optional)
+    ├── coverage_config.yml   # Coverage tracking settings (optional)
+    └── features/             # Business rule invariants (one file per domain)
+        ├── orders.yml
+        ├── accounts.yml
+        └── auth.yml
+```
+
+---
+
+### contract.yml
+
+Controls which contract fault types are enabled globally, plus exclusion rules and simulation settings. **Invariants are not defined here** — they live in feature files.
 
 ```yaml
 version: "1.0"
 
-# Global settings
 settings:
-  default_quantifier: all  # For array fields: all, any, none
-  stop_on_first_catch: false  # Skip simulation once any test catches a fault (useful for quick runs)
+  default_quantifier: all       # For array fields: all, any, none
+  stop_on_first_catch: true     # Skip simulation once any test catches a fault
 
-# =============================================================================
-# INVARIANTS - Business Rule Validation (NEW)
-# =============================================================================
-# Define invariants (business rules) that your API responses must satisfy.
-# Metatest will generate mutations that violate these rules and verify
-# your tests catch the violations.
-
-endpoints:
-  /api/v1/orders/{id}:
-    GET:
-      invariants:
-        # Simple field constraint
-        - name: positive_quantity
-          field: quantity
-          greater_than: 0
-
-        # Enum validation
-        - name: valid_status
-          field: status
-          in: [PENDING, FILLED, REJECTED, CANCELLED]
-
-        # Conditional invariant (if/then)
-        - name: filled_order_has_timestamp
-          if:
-            field: status
-            equals: FILLED
-          then:
-            field: filled_at
-            is_not_null: true
-
-        # Cross-field comparison
-        - name: created_before_updated
-          field: created_at
-          less_than_or_equal: $.updated_at
-
-  /api/v1/orders:
-    GET:
-      invariants:
-        # Array field validation (applies to all items)
-        - name: all_orders_positive_quantity
-          field: $[*].quantity
-          greater_than: 0
-
-# =============================================================================
-# CONTRACT FAULTS - Field-Level Mutations
-# =============================================================================
-faults:
+contract:
   null_field:
     enabled: true
   missing_field:
@@ -199,31 +207,130 @@ faults:
     enabled: false
   empty_string:
     enabled: false
-  invalid_value:
-    enabled: false
 
-# =============================================================================
-# EXCLUSIONS
-# =============================================================================
 exclusions:
   urls:
-    - '*/login*'
-    - '*/auth/*'
-    - '*/health'
+    - '*/health*'
+    - '*/actuator/*'
   tests:
-    - '*IntegrationTest*'
-    - '*LoginTest*'
+    - '*SmokeTest*'
 
-# Simulation filters
 simulation:
   only_success_responses: true
   skip_collections_response: true
   min_response_fields: 1
+```
 
-# Report configuration
-report:
-  format: json
-  output_path: "./fault_simulation_report.json"
+---
+
+### Feature Files
+
+Feature files define the invariants (business rules) for a domain. They live in `src/test/resources/metatest/features/` and are loaded automatically.
+
+Each file groups related invariants together and specifies which tests exercise those endpoints:
+
+```yaml
+feature: "Order Management"
+description: >
+  Business rules for order lifecycle: status transitions,
+  price constraints, and temporal ordering.
+
+invariants:
+  /api/v1/orders/{id}:
+    GET:
+      invariants:
+        - name: positive_quantity
+          field: quantity
+          greater_than: 0
+
+        - name: valid_status
+          field: status
+          in: [PENDING, FILLED, REJECTED, CANCELLED]
+
+        - name: filled_order_has_timestamp
+          if:
+            field: status
+            equals: FILLED
+          then:
+            field: filled_at
+            is_not_null: true
+
+        - name: created_before_filled
+          if:
+            field: filled_at
+            is_not_null: true
+          then:
+            field: created_at
+            less_than_or_equal: $.filled_at
+
+  /api/v1/orders:
+    GET:
+      invariants:
+        - name: all_orders_positive_quantity
+          field: $[*].quantity
+          greater_than: 0
+
+    POST:
+      invariants:
+        - name: new_order_valid_status
+          field: status
+          in: [PENDING, FILLED, REJECTED]
+
+# Tests that exercise these endpoints.
+# Metatest re-runs these during simulation to check if they catch violations.
+tests:
+  - class: com.example.OrdersApiTest
+    methods:
+      - testCreateBuyOrder
+      - testCreateSellOrder
+      - testListMyOrders
+```
+
+**Why feature files instead of a single config?**
+
+- Invariants express business semantics — grouping them by domain keeps them meaningful and maintainable
+- Different teams can own different feature files
+- Test mappings make it explicit which tests are responsible for catching which violations
+- The report shows gaps per feature, not just per endpoint
+
+---
+
+### metatest.properties
+
+Optional. Required only when using the cloud API for fault strategy configuration.
+
+```properties
+# src/test/resources/metatest/metatest.properties
+metatest.api.key=mt_proj_xxxxxxxxxxxxx
+metatest.project.id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+metatest.api.url=http://localhost:8080
+
+# Force local mode even when API key is present
+metatest.config.source=local
+```
+
+Configuration source priority: system property `metatest.config.source` > env var `METATEST_CONFIG_SOURCE` > `metatest.properties` > auto-detect (uses API if key is present).
+
+---
+
+### coverage_config.yml
+
+Optional. Controls endpoint coverage tracking.
+
+```yaml
+# src/test/resources/metatest/coverage_config.yml
+coverage:
+  enabled: true
+  output_file: schema_coverage.json
+  urls:
+    - http://localhost:8080   # empty = track all
+  include_request_body: true
+  include_response_body: false
+  aggregate_by_pattern: true
+  gap_analysis:
+    enabled: true
+    openapi_spec_path: api-spec.yaml
+    output_file: gap_analysis.json
 ```
 
 ---
@@ -241,7 +348,7 @@ Invariants define business rules that API responses must satisfy. Metatest gener
 | `greater_than` | Numeric > | `greater_than: 0` |
 | `greater_than_or_equal` | Numeric >= | `greater_than_or_equal: 0` |
 | `less_than` | Numeric < | `less_than: 100` |
-| `less_than_or_equal` | Numeric <= | `less_than_or_equal: $.other_field` |
+| `less_than_or_equal` | Numeric <=, or cross-field | `less_than_or_equal: $.updated_at` |
 | `in` | Value in list | `in: [BUY, SELL]` |
 | `not_in` | Value not in list | `not_in: [DELETED, ARCHIVED]` |
 | `is_null` | Must be null | `is_null: true` |
@@ -251,157 +358,46 @@ Invariants define business rules that API responses must satisfy. Metatest gener
 
 ### Field References
 
-Use `$.field_name` to reference other fields in the same response:
+Use `$.field_name` to reference another field in the same response:
 
 ```yaml
-- name: filled_after_created
+- name: created_before_updated
   field: created_at
-  less_than_or_equal: $.filled_at
+  less_than_or_equal: $.updated_at
 ```
 
 ### Array Fields
 
-Use `$[*].field` syntax to validate all items in an array:
+Use `$[*].field` to validate every item in an array response:
 
 ```yaml
-- name: all_items_positive_price
+- name: all_prices_positive
   field: $[*].price
   greater_than: 0
 ```
 
-The `default_quantifier` setting controls how array validations work:
-- `all` (default): All items must satisfy the condition
-- `any`: At least one item must satisfy
-- `none`: No items should satisfy
+The `default_quantifier` in `contract.yml` controls evaluation:
+- `all` (default): every item must satisfy the condition
+- `any`: at least one item must satisfy
+- `none`: no item should satisfy
 
 ### Conditional Invariants (if/then)
 
-Define rules that only apply when a precondition is met:
+Rules that apply only when a precondition holds:
 
 ```yaml
-- name: filled_order_has_filled_at
+- name: shipped_order_has_tracking
   if:
     field: status
-    equals: FILLED
+    equals: SHIPPED
   then:
-    field: filled_at
-    is_not_null: true
+    field: tracking_number
+    is_not_empty: true
 ```
 
-This invariant only applies when `status == FILLED`. Metatest will:
-1. Skip this invariant if status is not FILLED
-2. Generate a mutation setting `filled_at` to null when status is FILLED
-3. Verify your test catches this violation
+Metatest skips this invariant when `status != SHIPPED`. When `status == SHIPPED`, it generates a mutation violating the `then` clause and checks if your test catches it.
 
-### Complete Example for Any API
-
-Here's a template you can adapt for your own API:
-
-```yaml
-version: "1.0"
-
-settings:
-  default_quantifier: all
-  # Set to true for faster smoke runs (skips faults already caught by other tests)
-  stop_on_first_catch: false
-
-endpoints:
-  # ============================================
-  # USER MANAGEMENT
-  # ============================================
-  /api/users/{id}:
-    GET:
-      invariants:
-        - name: user_has_email
-          field: email
-          is_not_empty: true
-
-        - name: valid_user_status
-          field: status
-          in: [ACTIVE, SUSPENDED, PENDING]
-
-        - name: active_user_has_verified_email
-          if:
-            field: status
-            equals: ACTIVE
-          then:
-            field: email_verified
-            equals: true
-
-  /api/users:
-    GET:
-      invariants:
-        - name: all_users_have_id
-          field: $[*].id
-          is_not_null: true
-
-    POST:
-      invariants:
-        - name: new_user_is_pending
-          field: status
-          equals: PENDING
-
-  # ============================================
-  # E-COMMERCE
-  # ============================================
-  /api/products/{id}:
-    GET:
-      invariants:
-        - name: positive_price
-          field: price
-          greater_than: 0
-
-        - name: non_negative_stock
-          field: stock_quantity
-          greater_than_or_equal: 0
-
-        - name: discounted_price_less_than_original
-          if:
-            field: discount_price
-            is_not_null: true
-          then:
-            field: discount_price
-            less_than: $.price
-
-  /api/orders/{id}:
-    GET:
-      invariants:
-        - name: order_total_positive
-          field: total_amount
-          greater_than: 0
-
-        - name: shipped_order_has_tracking
-          if:
-            field: status
-            equals: SHIPPED
-          then:
-            field: tracking_number
-            is_not_empty: true
-
-        - name: all_items_positive_quantity
-          field: $[*].items.quantity
-          greater_than: 0
-
-  # ============================================
-  # AUTHENTICATION
-  # ============================================
-  /api/auth/login:
-    POST:
-      invariants:
-        - name: login_returns_token
-          field: access_token
-          is_not_empty: true
-
-        - name: token_type_is_bearer
-          field: token_type
-          equals: bearer
-
-faults:
-  null_field:
-    enabled: true
-  missing_field:
-    enabled: true
-```
+---
 
 ## Installation
 
@@ -422,14 +418,9 @@ dependencyResolutionManagement {
 
 **build.gradle.kts:**
 ```kotlin
-plugins {
-    java
-}
-
 dependencies {
     testImplementation("com.github.at-boundary:metatest-rest-java:v0.1.0")
 
-    // Your existing test dependencies
     testImplementation("org.junit.jupiter:junit-jupiter:5.9.1")
     testImplementation("io.rest-assured:rest-assured:5.3.0")
 }
@@ -454,83 +445,104 @@ tasks.test {
 }
 ```
 
-### Step 4: Run Tests
+### Step 4: Create Configuration
+
+Create `src/test/resources/metatest/contract.yml`:
+
+```yaml
+version: "1.0"
+
+settings:
+  default_quantifier: all
+  stop_on_first_catch: true
+
+contract:
+  null_field:
+    enabled: true
+  missing_field:
+    enabled: true
+```
+
+Create feature files in `src/test/resources/metatest/features/`:
+
+```yaml
+# src/test/resources/metatest/features/users.yml
+feature: "User Management"
+
+invariants:
+  /api/users/{id}:
+    GET:
+      invariants:
+        - name: user_has_email
+          field: email
+          is_not_empty: true
+
+        - name: valid_status
+          field: status
+          in: [ACTIVE, SUSPENDED, PENDING]
+
+        - name: active_user_has_verified_email
+          if:
+            field: status
+            equals: ACTIVE
+          then:
+            field: email_verified
+            equals: true
+
+tests:
+  - class: com.example.UserApiTest
+    methods:
+      - testGetUser
+      - testListUsers
+```
+
+### Step 5: Run Tests
 
 ```bash
-# Normal test execution (no mutation testing)
+# Normal test execution
 ./gradlew test
 
-# With Metatest fault simulation enabled
+# With Metatest fault simulation
 ./gradlew test -DrunWithMetatest=true
 ```
 
+---
+
 ## Reports and Analytics
 
-MetaTest generates both JSON and HTML reports after test execution.
+Metatest generates both JSON and HTML reports after test execution.
 
-### HTML Report (Human-Readable)
+### HTML Report
 
-Generated at `metatest_report.html` - Open this file in any web browser for an interactive, visual report.
+Generated at `metatest_report.html`. Open in any browser for an interactive view.
 
-**Features:**
-- Modern, responsive UI with tabs for different views
-- Summary dashboard with key metrics (detection rate, escaped faults, coverage)
-- Interactive fault simulation results with expandable details
-- Gap analysis showing tested vs untested endpoints
-- Schema coverage with detailed HTTP call logs
-- Color-coded status indicators (green = detected, red = escaped)
-
-Simply open `metatest_report.html` in your browser after running tests with MetaTest enabled.
+**Tabs:**
+- **Summary** — overall detection rate, escaped vs caught fault counts
+- **Fault Simulation** — per-endpoint breakdown of contract and invariant faults
+- **Test Matrix** — 2D grid of tests × faults showing which tests catch which violations
+- **Coverage** — endpoint coverage with HTTP call logs
+- **Gap Analysis** — endpoints in OpenAPI spec not covered by any test
 
 ### Fault Simulation Report (JSON)
 
-Generated at `fault_simulation_report.json` for programmatic access:
+Generated at `fault_simulation_report.json`:
 
 ```json
 {
-  "/api/users/{id}": {
+  "/api/v1/orders/{id}": {
     "contract_faults": {
       "null_field": {
-        "username": {
+        "status": {
           "caught_by_any_test": true,
-          "tested_by": ["UserApiTest.testGetUserById"],
-          "caught_by": [
-            {
-              "test": "UserApiTest.testGetUserById",
-              "caught": true,
-              "error": "Expected non-null but was: null"
-            }
-          ]
-        },
-        "email": {
-          "caught_by_any_test": false,
-          "tested_by": ["UserApiTest.testGetUserById"],
-          "caught_by": []
-        }
-      },
-      "missing_field": {
-        "username": {
-          "caught_by_any_test": false,
-          "tested_by": ["UserApiTest.testGetUserById"],
-          "caught_by": []
+          "tested_by": ["OrdersApiTest.testGetOrder"],
+          "caught_by": [{ "test": "OrdersApiTest.testGetOrder", "caught": true }]
         }
       }
     },
     "invariant_faults": {
-      "positive_balance": {
-        "caught_by_any_test": true,
-        "tested_by": ["UserApiTest.testGetUserById"],
-        "caught_by": [
-          {
-            "test": "UserApiTest.testGetUserById",
-            "caught": true,
-            "error": "Expected balance > 0"
-          }
-        ]
-      },
-      "active_user_has_email": {
+      "filled_order_has_timestamp": {
         "caught_by_any_test": false,
-        "tested_by": ["UserApiTest.testGetUserById"],
+        "tested_by": ["OrdersApiTest.testGetOrder"],
         "caught_by": []
       }
     }
@@ -538,55 +550,32 @@ Generated at `fault_simulation_report.json` for programmatic access:
 }
 ```
 
-**Report Structure:**
-- `contract_faults`: Field-level mutations (null, missing, empty)
-  - Grouped by fault type → field name
-- `invariant_faults`: Business rule violations
-  - Grouped by invariant name
+- `caught_by_any_test: false` — no test detected this violation; this is a test quality gap
+- `contract_faults` — structural mutations grouped by fault type and field
+- `invariant_faults` — business rule violations grouped by invariant name
 
-**Key Fields:**
-- `caught_by_any_test`: `false` = Critical weakness, no test detected this fault
-- `tested_by`: List of all tests that ran with this mutation
-- `caught_by`: Details of tests that successfully detected the fault
+### Console Summary
 
-### Schema Coverage Report
+Metatest prints an ASCII summary after all simulations:
 
-Generated at `schema_coverage.json`:
-
-```json
-{
-  "/api/users/{id}": {
-    "GET": {
-      "response_fields": ["id", "username", "email", "created_at"],
-      "tested_by": ["UserApiTest.testGetUserById"],
-      "coverage_percentage": 100.0
-    }
-  }
-}
+```
+============================================================
+  METATEST FAULT SIMULATION SUMMARY
+============================================================
+  Test                          Caught   Total   Escaped
+------------------------------------------------------------
+  OrdersApiTest.testGetOrder      8        12      4
+  AuthApiTest.testLogin           3         3      0
+------------------------------------------------------------
+  TOTAL                          11        15      4
+============================================================
+Escaped faults in OrdersApiTest.testGetOrder:
+  [X] invariant: filled_order_has_timestamp
+  [X] invariant: valid_status
+  ...
 ```
 
-### Gap Analysis Report
-
-Generated at `gap_analysis.json`:
-
-Identifies endpoints defined in OpenAPI specification but not covered by tests.
-
-```json
-{
-  "untested_endpoints": [
-    {
-      "path": "/api/users/{id}",
-      "method": "DELETE",
-      "reason": "No test execution captured"
-    }
-  ],
-  "coverage_summary": {
-    "total_endpoints": 12,
-    "tested_endpoints": 10,
-    "coverage_percentage": 83.33
-  }
-}
-```
+---
 
 ## Integration with CI/CD
 
@@ -600,9 +589,6 @@ on: [push, pull_request]
 jobs:
   test-quality:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
 
     steps:
       - uses: actions/checkout@v4
@@ -613,23 +599,8 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Run tests with MetaTest
-        env:
-          GPR_USER: ${{ github.actor }}
-          GPR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run tests with Metatest
         run: ./gradlew test -DrunWithMetatest=true
-
-      - name: Analyze fault detection rate
-        run: |
-          DETECTED=$(jq '[.[][] | .[] | select(.caught_by_any_test == true)] | length' fault_simulation_report.json)
-          TOTAL=$(jq '[.[][] | .[] | length] | add' fault_simulation_report.json)
-          RATE=$(echo "scale=2; $DETECTED / $TOTAL * 100" | bc)
-          echo "Fault Detection Rate: $RATE%"
-
-          if (( $(echo "$RATE < 95" | bc -l) )); then
-            echo "::error::Fault detection rate below 95% threshold"
-            exit 1
-          fi
 
       - name: Upload reports
         uses: actions/upload-artifact@v4
@@ -638,116 +609,24 @@ jobs:
           name: metatest-reports
           path: |
             fault_simulation_report.json
+            metatest_report.html
             schema_coverage.json
-            gap_analysis.json
 ```
 
-## Use Cases
-
-### 1. Validating API Client Libraries
-
-When building SDK/client libraries that wrap REST APIs, Metatest ensures error handling is robust:
-
-```java
-@Test
-void testGetUser_handlesNullFields() {
-    User user = apiClient.getUser(123);
-    assertNotNull(user.getEmail(), "Email should never be null");
-    assertNotNull(user.getUsername(), "Username should never be null");
-}
-```
-
-Metatest will inject `"email": null` and verify the test catches it.
-
-### 2. Contract Testing
-
-Verify your tests would catch breaking API changes:
-
-```java
-@Test
-void testUserResponse_requiresIdField() {
-    Response response = RestAssured.get("/users/123");
-    assertNotNull(response.jsonPath().get("id"), "id field is required");
-}
-```
-
-Metatest removes the `id` field and confirms the test fails appropriately.
-
-### 3. Integration Test Hardening
-
-Identify weak assertions in existing test suites without manual review:
-
-```java
-// Weak test - only checks status code
-@Test
-void testGetOrder() {
-    Response response = RestAssured.get("/orders/456");
-    assertEquals(200, response.statusCode());
-    // Missing: field validations, null checks, type assertions
-}
-```
-
-Metatest will show this test passes even when response fields are null or missing.
-
-## Comparison with Traditional Testing
-
-| Aspect | Traditional Testing | Metatest |
-|--------|-------------------|----------|
-| **Measures** | Code execution paths | Assertion quality |
-| **Answers** | "Is this code executed?" | "Would tests catch bugs?" |
-| **Coverage** | Line/branch coverage | Fault detection coverage |
-| **False confidence** | High coverage, weak assertions | Exposes weak assertions |
-| **Implementation** | Source instrumentation | Response mutation |
+---
 
 ## Performance Considerations
 
-### Execution Time
-
-Simulation time increases linearly with:
-- Number of response fields: `F`
-- Number of enabled fault types: `T`
-- Number of tests: `N`
-
-**Total test re-executions**: `N × F × T`
-
-Example: 10 tests, 5 fields per response, 4 fault types = 200 additional test runs.
+Simulation time scales with: tests × response fields × enabled fault types.
 
 **Optimization strategies:**
-- Use `settings.stop_on_first_catch: true` to skip faults already caught by other tests (best for smoke runs)
-- Use `simulation.only_success_responses: true` to skip error responses
-- Exclude slow/integration tests via `tests.exclude` patterns
+- `stop_on_first_catch: true` — skips a fault once any test catches it (faster, less detail)
+- `simulation.only_success_responses: true` — skip error responses
+- `simulation.min_response_fields` — skip simple responses
+- Add slow tests to `exclusions.tests`
 - Run Metatest on CI only, not during local development
-- Configure `simulation.min_response_fields` to skip simple responses
 
-### Stop on First Catch
-
-When `stop_on_first_catch: true` is enabled, Metatest skips simulating a fault once any test has already caught it:
-
-```yaml
-settings:
-  stop_on_first_catch: true
-```
-
-**Use cases:**
-- Quick smoke runs to verify at least one test catches each fault type
-- Faster feedback during development
-- CI pipelines where you only need pass/fail per fault
-
-**Trade-off:** You lose information about which specific tests catch each fault. Set to `false` (default) for complete coverage analysis.
-
-### Memory Usage
-
-AspectJ weaving requires additional heap space. The Gradle plugin automatically configures:
-- `-Xmx2g` - Maximum heap size
-- `-Xms512m` - Initial heap size
-
-Adjust if needed for large test suites:
-
-```kotlin
-metatest {
-    jvmArgs = listOf("-Xmx4g", "-Xms1g")
-}
-```
+---
 
 ## Requirements
 
@@ -756,139 +635,50 @@ metatest {
 - **JUnit**: 5.x (Jupiter)
 - **HTTP Client**: Apache HttpClient (via RestAssured or direct usage)
 
+---
+
 ## Troubleshooting
 
-### AspectJ Weaver Not Found
+### No fault simulation occurs
 
-**Symptom**: Tests run but no fault simulation occurs.
+Verify `-DrunWithMetatest=true` is set and `aspectjweaver` is on the test classpath.
 
-**Solution**: Ensure `aspectjweaver` is on test classpath:
+### Configuration file not found
+
+Ensure `contract.yml` is at `src/test/resources/metatest/contract.yml`. The fallback search order is: `metatest/contract.yml` → `contract.yml` → `config.yml`.
+
+### Unexpected API connection attempt
+
+If you see a `ConnectException` to `localhost:8080`, your `metatest.properties` contains an API key and auto-detection is picking up the API source. Add `metatest.config.source=local` to `metatest.properties` to force local mode.
+
+### Feature invariants not appearing in report
+
+Verify feature files are in `src/test/resources/metatest/features/` and contain a valid `tests:` section mapping to real test class and method names.
+
+### AspectJ weaver not found
+
 ```kotlin
 testImplementation("org.aspectj:aspectjweaver:1.9.19")
 ```
 
-### No HTTP Responses Captured
-
-**Symptom**: Log shows "No interceptable HTTP response was captured."
-
-**Solution**: Verify you're using Apache HttpClient (RestAssured uses it by default). Metatest does not support Java's native `HttpURLConnection` or OkHttp without custom adapters.
-
-### Tests Fail Only with Metatest Enabled
-
-**Symptom**: Tests pass normally but fail with `-DrunWithMetatest=true`.
-
-**Solution**: This indicates tests have weak assertions. Review the fault simulation report to identify which fields are not being validated.
-
-### Configuration File Not Found
-
-**Symptom**: `FileNotFoundException: config.yml`
-
-**Solution**: Ensure `config.yml` is in `src/main/resources/` or `src/test/resources/`. Check file name spelling.
-
-### GitHub Packages Authentication Failed
-
-**Symptom**: `Could not resolve io.metatest:metatest:x.x.x`
-
-**Solution**:
-1. Set `GPR_USER` and `GPR_TOKEN` environment variables
-2. Or create `~/.gradle/gradle.properties`:
-   ```properties
-   gpr.user=your-github-username
-   gpr.token=ghp_xxxxxxxxxxxxxxxxxxxxx
-   ```
-3. Token requires `read:packages` scope
-
-## Project Structure
-
-```
-metatest-rest-java/
-├── lib/                       # Core library module
-│   ├── src/main/java/
-│   │   └── metatest/
-│   │       ├── core/         # Core framework
-│   │       ├── injection/    # Fault strategies
-│   │       ├── simulation/   # Execution engine
-│   │       ├── coverage/     # Coverage tracking
-│   │       ├── analytics/    # Analysis tools
-│   │       ├── http/         # HTTP abstractions
-│   │       └── api/          # Cloud API client
-│   └── src/test/java/        # Framework tests
-├── gradle-plugin/             # Gradle plugin module
-│   └── src/main/java/
-│       └── metatest/gradle/
-│           ├── MetatestPlugin      # Plugin entry point
-│           └── MetatestExtension   # Configuration DSL
-└── settings.gradle.kts        # Multi-module configuration
-```
+---
 
 ## Building from Source
 
 ```bash
-# Clone repository
 git clone https://github.com/at-boundary/metatest-rest-java.git
 cd metatest-rest-java
 
-# Build and publish to local Maven
 ./gradlew publishToMavenLocal
-
-# Run framework tests
 ./gradlew :lib:test
 
-# Run example project tests with MetaTest
+# Run example project
 cd ../metatest-rest-java-example
 ./gradlew test -DrunWithMetatest=true
 ```
-
-## Publishing
-
-### GitHub Packages
-
-Configured in `lib/build.gradle.kts` and `gradle-plugin/build.gradle.kts`:
-
-```bash
-export GPR_USER=your-github-username
-export GPR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxx
-
-./gradlew publish
-```
-
-Publishes three artifacts:
-- `io.metatest:metatest` - Core library
-- `io.metatest:gradle-plugin` - Plugin implementation
-- `io.metatest.gradle.plugin:io.metatest.gradle.plugin` - Plugin marker artifact
-
-## Related Projects
-
-- **Antigen** - AI-powered test generation with Metatest validation
-- **PIT** - Mutation testing for Java source code (not API responses)
-- **RestAssured** - REST API testing framework
-- **WireMock** - HTTP mocking for testing
-
-## Research Background
-
-Metatest applies mutation testing principles to integration testing. Traditional mutation testing modifies source code; Metatest modifies API responses at runtime.
-
-**Key Difference**: Metatest validates external contract adherence rather than internal logic coverage.
-
-
+---
 
 ## Support
 
 - **Issues**: https://github.com/at-boundary/metatest-rest-java/issues
 - **Example Project**: https://github.com/at-boundary/metatest-rest-java-example
-- **Documentation**: See `/docs` directory (coming soon)
-
-## Changelog
-
-### 1.0.0-dev (Current)
-
-- Initial release
-- Support for JUnit 5 + Apache HttpClient
-- Local configuration via YAML
-- API configuration via properties
-- Four fault injection strategies
-- Gradle plugin for zero-config setup
-- Multi-module architecture (lib + gradle-plugin)
-- Fault simulation reports
-- Schema coverage tracking
-- Gap analysis with OpenAPI specs
