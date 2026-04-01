@@ -499,11 +499,40 @@ tests:
 ### Step 5: Run Tests
 
 ```bash
-# Normal test execution
-./gradlew test
+./gradlew test                 # normal run, no simulation
+./gradlew test metatest        # test with simulation
+```
 
-# With Metatest fault simulation
-./gradlew test -DrunWithMetatest=true
+`metatest` is a modifier task — append it to any test task to enable simulation on that run:
+
+```bash
+./gradlew integrationTest metatest    # works with any test task
+./gradlew test apiTest metatest       # enables simulation on multiple tasks
+```
+
+If you're using the Gradle plugin (`id("io.metatest")`), the `metatest` task is registered automatically. Without the plugin, add this to `build.gradle.kts`:
+
+```kotlin
+val aspectjAgent: File? = configurations.testRuntimeClasspath.get()
+    .files.find { it.name.contains("aspectjweaver") }
+
+tasks.test {
+    useJUnitPlatform()
+    if (aspectjAgent != null) jvmArgs("-javaagent:$aspectjAgent")
+}
+
+gradle.taskGraph.whenReady {
+    if (hasTask(":metatest")) {
+        allTasks.filterIsInstance<Test>()
+            .filter { it.name != "metatest" }
+            .forEach { it.jvmArgs("-DrunWithMetatest=true") }
+    }
+}
+
+tasks.register("metatest") {
+    group = "verification"
+    description = "Enables Metatest fault simulation. Append to any test task."
+}
 ```
 
 ---
@@ -600,7 +629,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Run tests with Metatest
-        run: ./gradlew test -DrunWithMetatest=true
+        run: ./gradlew test metatest
 
       - name: Upload reports
         uses: actions/upload-artifact@v4
@@ -674,7 +703,7 @@ cd metatest-rest-java
 
 # Run example project
 cd ../metatest-rest-java-example
-./gradlew test -DrunWithMetatest=true
+./gradlew test metatest
 ```
 ---
 

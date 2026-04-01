@@ -24,7 +24,7 @@
 Thumbs.db
 
 .notes
-*metatester.properties
+*metatest.properties
 gap_*
 schema_coverage*
 fault_simulation*

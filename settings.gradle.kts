@@ -7,7 +7,7 @@
  * in the user manual at https://docs.gradle.org/6.9.1/userguide/multi_project_builds.html
  */
 
-rootProject.name = "metatester"
+rootProject.name = "metatest"
 include("lib")
 include("gradle-plugin")
 
